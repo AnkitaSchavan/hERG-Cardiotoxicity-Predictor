@@ -1,22 +1,14 @@
 # ==========================================================
 # 🧬 hERG Cardiotoxicity Predictor — Streamlit Web App
-# Works both locally (with RDKit) and online (without RDKit)
+# Works seamlessly on Streamlit Cloud (no RDKit dependency)
 # ==========================================================
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
-import matplotlib.pyplot as plt
 import plotly.express as px
-
-# Try importing RDKit safely
-try:
-    from rdkit import Chem
-    from rdkit.Chem import Descriptors, rdMolDescriptors, Draw
-    rdkit_available = True
-except ImportError:
-    rdkit_available = False
+from pubchempy import get_compounds
 
 # ✅ PAGE CONFIG — must be the FIRST Streamlit command
 st.set_page_config(
@@ -30,154 +22,147 @@ st.set_page_config(
 # ----------------------------------------------------------
 @st.cache_resource
 def load_model():
+    """Load pretrained hERG model and scaler"""
     model = joblib.load("herg_model.pkl")
     scaler = joblib.load("scaler.pkl")
-    return model, scaler
+    feature_names = joblib.load("feature_names.pkl")
+    return model, scaler, feature_names
+
+
+try:
+    model, scaler, feature_names = load_model()
+    st.success("✅ Model loaded successfully!")
+except Exception as e:
+    st.error(f"❌ Error loading model/scaler files: {e}")
+    st.stop()
 
 # ----------------------------------------------------------
-# FEATURE GENERATION FUNCTION
+# PUBCHEMPY FEATURE EXTRACTION
 # ----------------------------------------------------------
-def smiles_to_features(smiles):
-    """Convert SMILES to molecular descriptors."""
-    if not rdkit_available:
-        return None
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        return None
-
-    features = {
-        "MolWt": Descriptors.MolWt(mol),
-        "LogP": Descriptors.MolLogP(mol),
-        "NumHDonors": rdMolDescriptors.CalcNumHBD(mol),
-        "NumHAcceptors": rdMolDescriptors.CalcNumHBA(mol),
-        "TPSA": rdMolDescriptors.CalcTPSA(mol),
-        "NumRotatableBonds": rdMolDescriptors.CalcNumRotatableBonds(mol),
-        "NumAromaticRings": rdMolDescriptors.CalcNumAromaticRings(mol),
-        "NumAliphaticRings": rdMolDescriptors.CalcNumAliphaticRings(mol),
-        "NumHeavyAtoms": mol.GetNumHeavyAtoms(),
-        "NumRings": rdMolDescriptors.CalcNumRings(mol),
-    }
-    return features
+def get_pubchem_features(compound_name):
+    """Fetch basic molecular properties from PubChem using PubChemPy"""
+    try:
+        compound = get_compounds(compound_name, 'name')[0]
+        features = {
+            "MolecularWeight": compound.molecular_weight,
+            "XLogP": compound.xlogp,
+            "HBondDonorCount": compound.hbond_donor_count,
+            "HBondAcceptorCount": compound.hbond_acceptor_count,
+            "RotatableBondCount": compound.rotatable_bond_count,
+            "TPSA": compound.tpsa,
+        }
+        image_url = compound.image  # 2D image from PubChem
+        return features, image_url
+    except Exception as e:
+        st.error(f"Could not retrieve PubChem data for '{compound_name}'. Error: {e}")
+        return None, None
 
 # ----------------------------------------------------------
-# HEADER & SIDEBAR
+# SIDEBAR INFO
 # ----------------------------------------------------------
-st.title("🧬 hERG Cardiotoxicity Predictor")
-
-st.markdown("""
-This application predicts whether a molecule blocks the **hERG potassium channel**, 
-a key factor in assessing cardiac toxicity risk during drug development.
-""")
-
 st.sidebar.header("About")
 st.sidebar.info("""
 **Model:** Random Forest Classifier  
 **Dataset:** TDC hERG Toxicity  
-**Input:** SMILES molecular structure  
+**Input:** Compound name (PubChem)  
 **Output:** Toxic (1) or Non-toxic (0)
 """)
 
-st.sidebar.header("Example SMILES")
-st.sidebar.code("CCO  # Ethanol")
-st.sidebar.code("CC(=O)OC1=CC=CC=C1C(=O)O  # Aspirin")
-st.sidebar.code("CN1C=NC2=C1C(=O)N(C(=O)N2C)C  # Caffeine")
+st.sidebar.header("Example Compounds")
+st.sidebar.code("aspirin")
+st.sidebar.code("caffeine")
+st.sidebar.code("amiodarone")
+st.sidebar.code("ibuprofen")
 
 # ----------------------------------------------------------
-# MAIN CONTENT
+# MAIN PAGE CONTENT
 # ----------------------------------------------------------
-try:
-    model, scaler = load_model()
-    st.success("✅ Model loaded successfully!")
+st.title("🧬 hERG Cardiotoxicity Predictor (PubChem Edition)")
 
-    st.header("Enter Molecule Information")
+st.markdown("""
+Predict whether a given compound may block the **hERG potassium channel**, 
+a critical marker of **cardiac toxicity** in drug discovery.
 
-    col1, col2 = st.columns([2, 1])
+This version automatically retrieves compound properties from **PubChem**.
+""")
 
-    with col1:
-        smiles_input = st.text_input(
-            "Enter SMILES notation:",
-            placeholder="e.g., CC(=O)OC1=CC=CC=C1C(=O)O",
-            help="SMILES (Simplified Molecular Input Line Entry System) represents molecular structures."
-        )
+col1, col2 = st.columns([2, 1])
 
-        if st.button("🔍 Predict Toxicity", type="primary"):
-            if not smiles_input:
-                st.warning("Please enter a SMILES notation.")
-            elif not rdkit_available:
-                st.error("❌ RDKit is not available. Molecular feature extraction cannot proceed.")
-            else:
-                with st.spinner("Analyzing molecule..."):
-                    mol = Chem.MolFromSmiles(smiles_input)
-                    if mol is None:
-                        st.error("❌ Invalid SMILES notation. Please check your input.")
+with col1:
+    compound_input = st.text_input(
+        "Enter compound name or PubChem CID:",
+        placeholder="e.g., aspirin, caffeine, 2244 (CID)",
+        help="Enter the compound name or PubChem Compound ID (CID)"
+    )
+
+    if st.button("🔍 Predict Toxicity", type="primary"):
+        if not compound_input:
+            st.warning("⚠️ Please enter a compound name or CID.")
+        else:
+            with st.spinner("Fetching molecular properties from PubChem..."):
+                features, image_url = get_pubchem_features(compound_input)
+
+                if features:
+                    st.subheader("🔬 Retrieved Molecular Features")
+                    st.dataframe(pd.DataFrame([features]))
+
+                    # Map PubChem features to model features
+                    feature_vector = np.zeros(len(feature_names))
+                    for i, f in enumerate(feature_names):
+                        if f in features and features[f] is not None:
+                            feature_vector[i] = features[f]
+
+                    # Preprocess and predict
+                    features_scaled = scaler.transform([feature_vector])
+                    prediction = model.predict(features_scaled)[0]
+                    prediction_proba = model.predict_proba(features_scaled)[0]
+
+                    # ---------------------- Results ----------------------
+                    st.header("Prediction Results")
+                    col_a, col_b, col_c = st.columns(3)
+                    with col_a:
+                        st.metric("Prediction", "TOXIC ⚠️" if prediction == 1 else "NON-TOXIC ✅")
+                    with col_b:
+                        st.metric("Confidence (Non-toxic)", f"{prediction_proba[0]:.2%}")
+                    with col_c:
+                        st.metric("Confidence (Toxic)", f"{prediction_proba[1]:.2%}")
+
+                    # ---------------------- Visualization ----------------------
+                    if image_url:
+                        st.subheader("🧪 Molecular Structure")
+                        st.image(image_url, caption="2D structure from PubChem", use_container_width=True)
+
+                    st.subheader("📊 Molecular Descriptor Values")
+                    fig = px.bar(
+                        x=list(features.keys()),
+                        y=list(features.values()),
+                        labels={"x": "Descriptor", "y": "Value"},
+                        title="Molecular Descriptor Overview"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # ---------------------- Interpretation ----------------------
+                    if prediction == 1:
+                        st.warning("""
+                        ⚠️ **Warning:** This molecule is predicted to block the hERG channel, 
+                        which may cause **cardiac arrhythmias** and other side effects.
+                        """)
                     else:
-                        features = smiles_to_features(smiles_input)
-                        if features is None:
-                            st.error("❌ Could not extract molecular features.")
-                        else:
-                            features_df = pd.DataFrame([features])
-                            features_scaled = scaler.transform(features_df)
+                        st.success("""
+                        ✅ **Safe:** This molecule is predicted to have a low risk of hERG toxicity.
+                        (Note: Always consider multiple toxicity endpoints.)
+                        """)
 
-                            prediction = model.predict(features_scaled)[0]
-                            prediction_proba = model.predict_proba(features_scaled)[0]
+with col2:
+    st.info("""
+    ### How to Use
+    1. Enter a valid compound name (e.g., aspirin)
+    2. Click **Predict Toxicity**
+    3. View molecular features, image, and prediction results
 
-                            st.header("Prediction Results")
-
-                            col_a, col_b, col_c = st.columns(3)
-                            with col_a:
-                                st.metric("Prediction", "TOXIC ⚠️" if prediction == 1 else "NON-TOXIC ✅")
-                            with col_b:
-                                st.metric("Confidence (Non-toxic)", f"{prediction_proba[0]:.2%}")
-                            with col_c:
-                                st.metric("Confidence (Toxic)", f"{prediction_proba[1]:.2%}")
-
-                            # ---------------------- Visualization ----------------------
-                            st.subheader("Molecular Structure")
-                            img = Draw.MolToImage(mol, size=(400, 400))
-                            st.image(img, caption="2D Molecular Structure")
-
-                            # Molecular Properties
-                            st.subheader("Molecular Properties")
-                            props_df = pd.DataFrame([features]).T
-                            props_df.columns = ["Value"]
-                            st.dataframe(props_df, use_container_width=True)
-
-                            # Feature visualization
-                            st.subheader("Feature Contribution Overview")
-                            fig = px.bar(
-                                x=list(features.keys()),
-                                y=list(features.values()),
-                                labels={"x": "Descriptor", "y": "Value"},
-                                title="Molecular Descriptor Values"
-                            )
-                            st.plotly_chart(fig, use_container_width=True)
-
-                            # Warning / success
-                            if prediction == 1:
-                                st.warning("""
-                                ⚠️ **Warning:** This molecule is predicted to block the hERG channel, 
-                                which may cause **cardiac arrhythmias** and other heart-related side effects.
-                                """)
-                            else:
-                                st.success("""
-                                ✅ **Good News:** This molecule is predicted to be safe regarding hERG toxicity.  
-                                (Note: This is only one aspect of drug safety.)
-                                """)
-
-    with col2:
-        st.info("""
-        **How to use:**
-        1. Enter a valid SMILES string  
-        2. Click **Predict Toxicity**  
-        3. Review the toxicity prediction and confidence levels
-
-        **Note:** RDKit is required for molecular feature extraction.
-        """)
-
-except FileNotFoundError:
-    st.error("""
-    ❌ Model files not found!  
-    Please ensure `herg_model.pkl` and `scaler.pkl` exist in the working directory.
+    ### Notes
+    - Uses **PubChemPy** to fetch molecular properties
+    - Works fully online (no RDKit needed)
     """)
 
 # ----------------------------------------------------------
@@ -187,6 +172,7 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center'>
     <p>🧠 Data Source: <a href='https://tdcommons.ai/'>Therapeutics Data Commons (TDC)</a></p>
-    <p>⚗️ Model trained on real hERG toxicity data using Random Forest</p>
+    <p>⚗️ Features from <a href='https://pubchem.ncbi.nlm.nih.gov/'>PubChem</a></p>
+    <p>💡 Machine Learning Model: Random Forest</p>
 </div>
 """, unsafe_allow_html=True)
