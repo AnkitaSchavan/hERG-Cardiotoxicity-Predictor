@@ -12,15 +12,16 @@ import numpy as np
 import joblib
 import plotly.express as px
 import plotly.graph_objects as go
+from io import BytesIO
+import base64
 
+# Try to import RDKit, fallback to manual SMILES parsing if not available
 try:
     from rdkit import Chem
     from rdkit.Chem import Descriptors, rdMolDescriptors, Draw
     RDKIT_AVAILABLE = True
 except ImportError:
     RDKIT_AVAILABLE = False
-    st.error("❌ RDKit is not available. Please check your installation.")
-    st.stop()
 
 # --------------------------------------------------
 # LOAD MODEL AND SCALER
@@ -40,13 +41,16 @@ def load_model():
         st.stop()
 
 # --------------------------------------------------
-# FEATURE EXTRACTION
+# FEATURE EXTRACTION WITH RDKIT
 # --------------------------------------------------
-def smiles_to_features(smiles):
+def smiles_to_features_rdkit(smiles):
     """Extract molecular features using RDKit"""
+    if not RDKIT_AVAILABLE:
+        return None, None
+        
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
-        return None
+        return None, None
 
     try:
         features = {
@@ -71,6 +75,59 @@ def smiles_to_features(smiles):
     except Exception as e:
         st.error(f"Error extracting features: {e}")
         return None, None
+
+# --------------------------------------------------
+# FALLBACK: BASIC SMILES PARSER (NO RDKIT NEEDED)
+# --------------------------------------------------
+def smiles_to_features_basic(smiles):
+    """Basic feature extraction from SMILES without RDKit - FALLBACK MODE"""
+    try:
+        # Count basic elements
+        mol_wt_map = {'C': 12, 'N': 14, 'O': 16, 'S': 32, 'P': 31, 'F': 19, 
+                      'Cl': 35.5, 'Br': 80, 'I': 127, 'H': 1}
+        
+        # Simple parsing
+        heavy_atoms = sum(smiles.count(atom) for atom in 'CNOSPF')
+        heavy_atoms += smiles.count('Cl') + smiles.count('Br')
+        
+        aromatic_rings = smiles.count('c')
+        rings = smiles.count('1') + smiles.count('2')
+        
+        # Estimate molecular weight (rough)
+        mol_wt = heavy_atoms * 12 + smiles.count('O') * 4 + smiles.count('N') * 2
+        
+        features = {
+            'MolWt': mol_wt,
+            'LogP': heavy_atoms * 0.5,  # Rough estimate
+            'NumHDonors': smiles.count('OH') + smiles.count('NH'),
+            'NumHAcceptors': smiles.count('O') + smiles.count('N'),
+            'TPSA': (smiles.count('O') + smiles.count('N')) * 20,
+            'NumRotatableBonds': smiles.count('-') if '-' in smiles else 3,
+            'NumAromaticRings': aromatic_rings,
+            'NumAliphaticRings': max(0, rings - aromatic_rings),
+            'NumHeavyAtoms': heavy_atoms,
+            'NumRings': rings,
+            'FractionCSP3': 0.3,  # Default
+            'NumHeteroAtoms': smiles.count('N') + smiles.count('O') + smiles.count('S'),
+            'MolMR': mol_wt * 0.3,
+            'HeavyAtomMolWt': mol_wt * 0.9,
+            'ExactMolWt': mol_wt,
+            'NumValenceElectrons': heavy_atoms * 4
+        }
+        return features, None
+    except:
+        return None, None
+
+# --------------------------------------------------
+# UNIVERSAL FEATURE EXTRACTOR
+# --------------------------------------------------
+def smiles_to_features(smiles):
+    """Try RDKit first, fallback to basic parser"""
+    if RDKIT_AVAILABLE:
+        return smiles_to_features_rdkit(smiles)
+    else:
+        st.warning("⚠️ RDKit not available - using basic SMILES parser (less accurate)")
+        return smiles_to_features_basic(smiles)
 
 # --------------------------------------------------
 # LIPINSKI'S RULE OF FIVE
@@ -101,15 +158,21 @@ def lipinski_check(features):
 st.title("🧬 hERG Cardiotoxicity Predictor")
 st.markdown("""
 This tool predicts whether a compound blocks the **hERG potassium channel**, which is associated with cardiac toxicity.  
-Model trained on **Therapeutics Data Commons (TDC)** hERG dataset using RDKit molecular descriptors.
+Model trained on **Therapeutics Data Commons (TDC)** hERG dataset.
 """)
+
+# Check RDKit status
+if RDKIT_AVAILABLE:
+    st.success("✅ RDKit is available - Full feature extraction enabled")
+else:
+    st.warning("⚠️ RDKit not available - Using fallback mode (predictions may be less accurate)")
 
 # Sidebar
 st.sidebar.header("ℹ️ About")
 st.sidebar.info("""
 **Model:** Random Forest Classifier  
 **Dataset:** TDC hERG Toxicity  
-**Features:** RDKit Descriptors  
+**Features:** Molecular Descriptors  
 **Input:** SMILES notation  
 **Output:** Toxic (1) or Non-toxic (0)
 """)
@@ -151,13 +214,11 @@ with tabs[0]:
         if st.button("🔍 Predict Toxicity", type="primary"):
             if smiles_input.strip():
                 with st.spinner("Analyzing molecule..."):
-                    result = smiles_to_features(smiles_input.strip())
+                    features, mol = smiles_to_features(smiles_input.strip())
                 
-                if result is None or result[0] is None:
+                if features is None:
                     st.error("❌ Invalid SMILES notation or feature extraction failed.")
                 else:
-                    features, mol = result
-                    
                     # Prepare features for model
                     features_df = pd.DataFrame([features])
                     
@@ -166,7 +227,6 @@ with tabs[0]:
                         model_features = scaler.feature_names_in_
                         features_df = features_df.reindex(columns=model_features, fill_value=0)
                     except AttributeError:
-                        # If scaler doesn't have feature_names_in_, use as is
                         pass
                     
                     features_scaled = scaler.transform(features_df)
@@ -213,13 +273,14 @@ with tabs[0]:
                     ))
                     st.plotly_chart(fig, use_container_width=True)
 
-                    # Molecular structure
-                    st.subheader("🔬 Molecular Structure")
-                    try:
-                        img = Draw.MolToImage(mol, size=(400, 400))
-                        st.image(img, caption="2D Molecular Structure", use_container_width=False)
-                    except Exception as e:
-                        st.warning(f"Could not generate molecule image: {e}")
+                    # Molecular structure (only if RDKit available)
+                    if RDKIT_AVAILABLE and mol is not None:
+                        st.subheader("🔬 Molecular Structure")
+                        try:
+                            img = Draw.MolToImage(mol, size=(400, 400))
+                            st.image(img, caption="2D Molecular Structure", use_container_width=False)
+                        except Exception as e:
+                            st.info("Molecular structure visualization unavailable")
 
                     # Lipinski rule check
                     st.subheader("💊 Drug-likeness (Lipinski's Rule of Five)")
@@ -300,11 +361,9 @@ with tabs[1]:
     )
     
     if smiles_viz.strip():
-        result = smiles_to_features(smiles_viz.strip())
+        features_viz, mol_viz = smiles_to_features(smiles_viz.strip())
         
-        if result and result[0]:
-            features_viz, mol_viz = result
-            
+        if features_viz:
             # Properties dataframe
             col1, col2 = st.columns(2)
             
@@ -316,11 +375,14 @@ with tabs[1]:
             
             with col2:
                 st.subheader("Molecular Image")
-                try:
-                    img = Draw.MolToImage(mol_viz, size=(300, 300))
-                    st.image(img, use_container_width=True)
-                except:
-                    st.warning("Could not generate image")
+                if RDKIT_AVAILABLE and mol_viz is not None:
+                    try:
+                        img = Draw.MolToImage(mol_viz, size=(300, 300))
+                        st.image(img, use_container_width=True)
+                    except:
+                        st.info("Molecular structure visualization unavailable")
+                else:
+                    st.info("Install RDKit for molecular structure visualization")
             
             # Bar chart of properties
             st.subheader("Property Distribution")
@@ -337,7 +399,6 @@ with tabs[1]:
             
             # Radar chart
             st.subheader("Molecular Descriptor Radar Plot")
-            # Normalize values for radar chart
             values = list(features_viz.values())
             max_val = max(values) if max(values) > 0 else 1
             normalized = [v/max_val * 100 for v in values]
@@ -366,10 +427,10 @@ with tabs[2]:
     ### 🔬 Technical Details
     
     **Algorithm:** Random Forest Classifier  
-    **Feature Extraction:** RDKit molecular descriptors  
+    **Feature Extraction:** Molecular descriptors  
     **Dataset:** Therapeutics Data Commons (TDC) - hERG Toxicity Dataset  
     **Frameworks:** 
-    - RDKit for molecular feature extraction
+    - RDKit for molecular feature extraction (if available)
     - Scikit-learn for machine learning
     - Streamlit for web interface
     - Plotly for interactive visualizations
@@ -414,7 +475,7 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center'>
     <p>🧬 Data Source: <a href='https://tdcommons.ai/' target='_blank'>Therapeutics Data Commons (TDC)</a></p>
-    <p>⚗️ Powered by RDKit | 🤖 Machine Learning with Scikit-learn</p>
+    <p>⚗️ Molecular Analysis Tool | 🤖 Machine Learning with Scikit-learn</p>
     <p>© 2025 hERG Cardiotoxicity Prediction Tool</p>
 </div>
 """, unsafe_allow_html=True)
