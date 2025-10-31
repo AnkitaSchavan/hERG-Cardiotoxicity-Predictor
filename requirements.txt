@@ -1,8 +1,7 @@
-streamlit==1.39.0
-pandas==2.2.3
-numpy==1.26.4
-pubchempy==1.0.4
-scikit-learn==1.5.2
-joblib==1.4.2
-
-
+streamlit
+pandas
+numpy
+joblib
+plotly
+pubchempy
+scikit-learn
