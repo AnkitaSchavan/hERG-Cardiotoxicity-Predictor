@@ -3,6 +3,5 @@ pandas
 numpy
 joblib
 plotly
-rdkit-pypi
 scikit-learn
 pillow
